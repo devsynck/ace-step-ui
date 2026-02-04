@@ -1,7 +1,8 @@
 import { writeFile, mkdir, copyFile, rm, stat, access } from 'fs/promises';
 import { spawn, execSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, createWriteStream } from 'fs';
 import path from 'path';
+import { pipeline } from 'stream/promises';
 
 // Get audio duration using ffprobe
 function getAudioDuration(filePath: string): number {
@@ -62,6 +63,233 @@ export function resolvePythonPath(baseDir: string): string {
 const ACESTEP_DIR = resolveAceStepPath();
 const SCRIPTS_DIR = path.join(__dirname, '../../scripts');
 const PYTHON_SCRIPT = path.join(SCRIPTS_DIR, 'simple_generate.py');
+
+// Cache API availability status (check once, remember for session)
+let apiAvailableCache: boolean | null = null;
+let apiCheckPromise: Promise<boolean> | null = null;
+
+// Check if ACE-Step API is running
+async function isApiAvailable(): Promise<boolean> {
+  // Return cached result if available
+  if (apiAvailableCache !== null) {
+    return apiAvailableCache;
+  }
+
+  // Prevent multiple concurrent checks
+  if (apiCheckPromise) {
+    return apiCheckPromise;
+  }
+
+  apiCheckPromise = (async () => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+
+      const response = await fetch(`${ACESTEP_API}/health`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (response.ok) {
+        const data = await response.json();
+        apiAvailableCache = data.status === 'ok' || data.healthy === true;
+        console.log(`[ACE-Step] API available at ${ACESTEP_API}: ${apiAvailableCache}`);
+        return apiAvailableCache;
+      }
+      apiAvailableCache = false;
+      return false;
+    } catch (error) {
+      console.log(`[ACE-Step] API not available at ${ACESTEP_API}, will use Python spawn`);
+      apiAvailableCache = false;
+      return false;
+    } finally {
+      apiCheckPromise = null;
+    }
+  })();
+
+  return apiCheckPromise;
+}
+
+// Reset API cache (useful if API starts/stops)
+export function resetApiCache(): void {
+  apiAvailableCache = null;
+  apiCheckPromise = null;
+}
+
+// Submit generation job to ACE-Step API
+async function submitToApi(params: GenerationParams): Promise<{ taskId: string }> {
+  const caption = params.style || 'pop music';
+  const prompt = params.customMode ? caption : (params.songDescription || caption);
+  const lyrics = params.instrumental ? '' : (params.lyrics || '');
+
+  const body: Record<string, unknown> = {
+    prompt,
+    lyrics,
+    audio_duration: params.duration ?? 60,
+    batch_size: params.batchSize ?? 1,
+    inference_steps: params.inferenceSteps ?? 8,
+    guidance_scale: params.guidanceScale ?? 10.0,
+    audio_format: params.audioFormat ?? 'mp3',
+    vocal_language: params.vocalLanguage || 'en',
+    use_random_seed: params.randomSeed !== false,
+    shift: params.shift ?? 3.0,
+  };
+
+  if (params.bpm && params.bpm > 0) body.bpm = params.bpm;
+  if (params.keyScale) body.key_scale = params.keyScale;
+  if (params.timeSignature) body.time_signature = params.timeSignature;
+  if (params.seed !== undefined && params.seed >= 0 && !params.randomSeed) {
+    body.seed = params.seed;
+    body.use_random_seed = false;
+  }
+  if (params.taskType && params.taskType !== 'text2music') body.task_type = params.taskType;
+  if (params.audioCodes) body.audio_code_string = params.audioCodes;
+  if (params.repaintingStart !== undefined && params.repaintingStart > 0) body.repainting_start = params.repaintingStart;
+  if (params.repaintingEnd !== undefined && params.repaintingEnd > 0) body.repainting_end = params.repaintingEnd;
+  if (params.audioCoverStrength !== undefined && params.audioCoverStrength !== 1.0) body.audio_cover_strength = params.audioCoverStrength;
+  if (params.instruction) body.instruction = params.instruction;
+  if (params.thinking) body.thinking = true;
+  if (params.lmTemperature !== undefined) body.lm_temperature = params.lmTemperature;
+  if (params.lmCfgScale !== undefined) body.lm_cfg_scale = params.lmCfgScale;
+  if (params.lmTopK !== undefined && params.lmTopK > 0) body.lm_top_k = params.lmTopK;
+  if (params.lmTopP !== undefined) body.lm_top_p = params.lmTopP;
+  if (params.useCotCaption !== undefined) body.use_cot_caption = params.useCotCaption;
+  if (params.useCotLanguage !== undefined) body.use_cot_language = params.useCotLanguage;
+  if (params.useAdg) body.use_adg = true;
+  if (params.cfgIntervalStart !== undefined && params.cfgIntervalStart > 0) body.cfg_interval_start = params.cfgIntervalStart;
+  if (params.cfgIntervalEnd !== undefined && params.cfgIntervalEnd < 1.0) body.cfg_interval_end = params.cfgIntervalEnd;
+
+  // Handle reference audio - need to pass file path
+  if (params.referenceAudioUrl) {
+    let refAudioPath = params.referenceAudioUrl;
+    if (refAudioPath.startsWith('/audio/')) {
+      refAudioPath = path.join(AUDIO_DIR, refAudioPath.replace('/audio/', ''));
+    }
+    body.reference_audio_path = refAudioPath;
+  }
+  if (params.sourceAudioUrl) {
+    let srcAudioPath = params.sourceAudioUrl;
+    if (srcAudioPath.startsWith('/audio/')) {
+      srcAudioPath = path.join(AUDIO_DIR, srcAudioPath.replace('/audio/', ''));
+    }
+    body.src_audio_path = srcAudioPath;
+  }
+
+  const response = await fetch(`${ACESTEP_API}/release_task`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`API error: ${response.status} - ${errorText}`);
+  }
+
+  const result = await response.json();
+  const taskId = result.data?.job_id || result.job_id;
+  if (!taskId) {
+    throw new Error('No task ID returned from API');
+  }
+
+  return { taskId };
+}
+
+// Poll API for job result
+interface ApiTaskResult {
+  status: number; // 0 = processing, 1 = done, 2 = failed
+  audioPaths: string[];
+  metas?: {
+    bpm?: number;
+    duration?: number;
+    genres?: string;
+    keyscale?: string;
+    timesignature?: string;
+  };
+}
+
+async function pollApiResult(taskId: string, maxWaitMs = 600000): Promise<ApiTaskResult> {
+  const startTime = Date.now();
+  const pollInterval = 2000; // 2 seconds
+
+  while (Date.now() - startTime < maxWaitMs) {
+    const response = await fetch(`${ACESTEP_API}/query_result`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id_list: [taskId] }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`API poll error: ${response.status}`);
+    }
+
+    const result = await response.json();
+    const taskData = result.data?.[0];
+
+    if (!taskData) {
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+      continue;
+    }
+
+    // Status: 0 = processing, 1 = done, 2 = failed
+    if (taskData.status === 1) {
+      // Parse result JSON
+      let resultData;
+      try {
+        resultData = typeof taskData.result === 'string' ? JSON.parse(taskData.result) : taskData.result;
+      } catch {
+        resultData = [];
+      }
+
+      const audioPaths = Array.isArray(resultData)
+        ? resultData.map((r: { file?: string }) => r.file).filter(Boolean)
+        : [];
+      const metas = resultData[0]?.metas;
+
+      return { status: 1, audioPaths, metas };
+    } else if (taskData.status === 2) {
+      throw new Error('Generation failed on API side');
+    }
+
+    // Still processing
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+  }
+
+  throw new Error('API generation timeout');
+}
+
+// Download audio from API
+async function downloadAudioFromApi(audioPath: string, destPath: string): Promise<void> {
+  const url = `${ACESTEP_API}/v1/audio?path=${encodeURIComponent(audioPath)}`;
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(`Failed to download audio: ${response.status}`);
+  }
+
+  const body = response.body;
+  if (!body) {
+    throw new Error('No response body');
+  }
+
+  await mkdir(path.dirname(destPath), { recursive: true });
+  const fileStream = createWriteStream(destPath);
+
+  // Convert web ReadableStream to Node stream
+  const reader = body.getReader();
+  const nodeStream = new (await import('stream')).Readable({
+    async read() {
+      const { done, value } = await reader.read();
+      if (done) {
+        this.push(null);
+      } else {
+        this.push(Buffer.from(value));
+      }
+    }
+  });
+
+  await pipeline(nodeStream, fileStream);
+}
 
 export interface GenerationParams {
   // Mode
@@ -248,12 +476,75 @@ async function processGeneration(
 ): Promise<void> {
   job.status = 'running';
 
-  // Build prompt for generation
   const caption = params.style || 'pop music';
   const prompt = params.customMode ? caption : (params.songDescription || caption);
   const lyrics = params.instrumental ? '' : (params.lyrics || '');
 
-  console.log(`Job ${jobId}: Starting generation via Python script`, {
+  // Check if ACE-Step API is available
+  const useApi = await isApiAvailable();
+
+  if (useApi) {
+    console.log(`Job ${jobId}: Using ACE-Step REST API`, {
+      prompt: prompt.slice(0, 50),
+      duration: params.duration,
+    });
+
+    try {
+      // Submit to API
+      const { taskId } = await submitToApi(params);
+      console.log(`Job ${jobId}: Submitted to API as task ${taskId}`);
+
+      // Poll for result
+      const apiResult = await pollApiResult(taskId);
+
+      if (!apiResult.audioPaths || apiResult.audioPaths.length === 0) {
+        throw new Error('No audio files generated by API');
+      }
+
+      // Download audio files from API to local storage
+      const audioUrls: string[] = [];
+      let actualDuration = 0;
+      const audioFormat = params.audioFormat ?? 'mp3';
+
+      for (const apiAudioPath of apiResult.audioPaths) {
+        const ext = apiAudioPath.includes('.flac') ? '.flac' : `.${audioFormat}`;
+        const filename = `${jobId}_${audioUrls.length}${ext}`;
+        const destPath = path.join(AUDIO_DIR, filename);
+
+        await downloadAudioFromApi(apiAudioPath, destPath);
+
+        if (audioUrls.length === 0) {
+          actualDuration = getAudioDuration(destPath);
+        }
+
+        audioUrls.push(`/audio/${filename}`);
+      }
+
+      const finalDuration = actualDuration > 0
+        ? actualDuration
+        : (apiResult.metas?.duration || params.duration || 60);
+
+      job.status = 'succeeded';
+      job.result = {
+        audioUrls,
+        duration: finalDuration,
+        bpm: apiResult.metas?.bpm || params.bpm,
+        keyScale: apiResult.metas?.keyscale || params.keyScale,
+        timeSignature: apiResult.metas?.timesignature || params.timeSignature,
+        status: 'succeeded',
+      };
+      console.log(`Job ${jobId}: Completed via API with ${audioUrls.length} audio files`);
+
+    } catch (error) {
+      console.error(`Job ${jobId}: API generation failed`, error);
+      job.status = 'failed';
+      job.error = error instanceof Error ? error.message : 'API generation failed';
+    }
+    return;
+  }
+
+  // Fall back to Python spawn if API not available
+  console.log(`Job ${jobId}: Using Python spawn (API not available)`, {
     prompt: prompt.slice(0, 50),
     lyricsPreview: lyrics.slice(0, 50),
     duration: params.duration,
@@ -261,11 +552,9 @@ async function processGeneration(
   });
 
   try {
-    // Create unique output directory for this job to avoid conflicts with concurrent jobs
     const jobOutputDir = path.join(ACESTEP_DIR, 'output', jobId);
     await mkdir(jobOutputDir, { recursive: true });
 
-    // Build command arguments for the Python script
     const args = [
       '--prompt', prompt,
       '--duration', String(params.duration ?? 60),
@@ -277,38 +566,17 @@ async function processGeneration(
       '--json',
     ];
 
-    // Basic parameters
-    if (lyrics) {
-      args.push('--lyrics', lyrics);
-    }
-    if (params.instrumental) {
-      args.push('--instrumental');
-    }
-    if (params.bpm && params.bpm > 0) {
-      args.push('--bpm', String(params.bpm));
-    }
-    if (params.keyScale) {
-      args.push('--key-scale', params.keyScale);
-    }
-    if (params.timeSignature) {
-      args.push('--time-signature', params.timeSignature);
-    }
-    if (params.vocalLanguage) {
-      args.push('--vocal-language', params.vocalLanguage);
-    }
-    if (params.seed !== undefined && params.seed >= 0 && !params.randomSeed) {
-      args.push('--seed', String(params.seed));
-    }
-    if (params.shift !== undefined) {
-      args.push('--shift', String(params.shift));
-    }
+    if (lyrics) args.push('--lyrics', lyrics);
+    if (params.instrumental) args.push('--instrumental');
+    if (params.bpm && params.bpm > 0) args.push('--bpm', String(params.bpm));
+    if (params.keyScale) args.push('--key-scale', params.keyScale);
+    if (params.timeSignature) args.push('--time-signature', params.timeSignature);
+    if (params.vocalLanguage) args.push('--vocal-language', params.vocalLanguage);
+    if (params.seed !== undefined && params.seed >= 0 && !params.randomSeed) args.push('--seed', String(params.seed));
+    if (params.shift !== undefined) args.push('--shift', String(params.shift));
+    if (params.taskType && params.taskType !== 'text2music') args.push('--task-type', params.taskType);
 
-    // Task type parameters
-    if (params.taskType && params.taskType !== 'text2music') {
-      args.push('--task-type', params.taskType);
-    }
     if (params.referenceAudioUrl) {
-      // Convert URL path to filesystem path
       let refAudioPath = params.referenceAudioUrl;
       if (refAudioPath.startsWith('/audio/')) {
         refAudioPath = path.join(AUDIO_DIR, refAudioPath.replace('/audio/', ''));
@@ -316,72 +584,30 @@ async function processGeneration(
       args.push('--reference-audio', refAudioPath);
     }
     if (params.sourceAudioUrl) {
-      // Convert URL path to filesystem path
       let srcAudioPath = params.sourceAudioUrl;
       if (srcAudioPath.startsWith('/audio/')) {
         srcAudioPath = path.join(AUDIO_DIR, srcAudioPath.replace('/audio/', ''));
       }
       args.push('--src-audio', srcAudioPath);
     }
-    if (params.audioCodes) {
-      args.push('--audio-codes', params.audioCodes);
-    }
-    if (params.repaintingStart !== undefined && params.repaintingStart > 0) {
-      args.push('--repainting-start', String(params.repaintingStart));
-    }
-    if (params.repaintingEnd !== undefined && params.repaintingEnd > 0) {
-      args.push('--repainting-end', String(params.repaintingEnd));
-    }
-    if (params.audioCoverStrength !== undefined && params.audioCoverStrength !== 1.0) {
-      args.push('--audio-cover-strength', String(params.audioCoverStrength));
-    }
-    if (params.instruction) {
-      args.push('--instruction', params.instruction);
-    }
+    if (params.audioCodes) args.push('--audio-codes', params.audioCodes);
+    if (params.repaintingStart !== undefined && params.repaintingStart > 0) args.push('--repainting-start', String(params.repaintingStart));
+    if (params.repaintingEnd !== undefined && params.repaintingEnd > 0) args.push('--repainting-end', String(params.repaintingEnd));
+    if (params.audioCoverStrength !== undefined && params.audioCoverStrength !== 1.0) args.push('--audio-cover-strength', String(params.audioCoverStrength));
+    if (params.instruction) args.push('--instruction', params.instruction);
+    if (params.thinking) args.push('--thinking');
+    if (params.lmTemperature !== undefined) args.push('--lm-temperature', String(params.lmTemperature));
+    if (params.lmCfgScale !== undefined) args.push('--lm-cfg-scale', String(params.lmCfgScale));
+    if (params.lmTopK !== undefined && params.lmTopK > 0) args.push('--lm-top-k', String(params.lmTopK));
+    if (params.lmTopP !== undefined) args.push('--lm-top-p', String(params.lmTopP));
+    if (params.lmNegativePrompt) args.push('--lm-negative-prompt', params.lmNegativePrompt);
+    if (params.useCotMetas === false) args.push('--no-cot-metas');
+    if (params.useCotCaption === false) args.push('--no-cot-caption');
+    if (params.useCotLanguage === false) args.push('--no-cot-language');
+    if (params.useAdg) args.push('--use-adg');
+    if (params.cfgIntervalStart !== undefined && params.cfgIntervalStart > 0) args.push('--cfg-interval-start', String(params.cfgIntervalStart));
+    if (params.cfgIntervalEnd !== undefined && params.cfgIntervalEnd < 1.0) args.push('--cfg-interval-end', String(params.cfgIntervalEnd));
 
-    // LM/CoT parameters
-    if (params.thinking) {
-      args.push('--thinking');
-    }
-    if (params.lmTemperature !== undefined) {
-      args.push('--lm-temperature', String(params.lmTemperature));
-    }
-    if (params.lmCfgScale !== undefined) {
-      args.push('--lm-cfg-scale', String(params.lmCfgScale));
-    }
-    if (params.lmTopK !== undefined && params.lmTopK > 0) {
-      args.push('--lm-top-k', String(params.lmTopK));
-    }
-    if (params.lmTopP !== undefined) {
-      args.push('--lm-top-p', String(params.lmTopP));
-    }
-    if (params.lmNegativePrompt) {
-      args.push('--lm-negative-prompt', params.lmNegativePrompt);
-    }
-
-    // CoT parameters (pass when disabled, since they default to true)
-    if (params.useCotMetas === false) {
-      args.push('--no-cot-metas');
-    }
-    if (params.useCotCaption === false) {
-      args.push('--no-cot-caption');
-    }
-    if (params.useCotLanguage === false) {
-      args.push('--no-cot-language');
-    }
-
-    // Advanced parameters
-    if (params.useAdg) {
-      args.push('--use-adg');
-    }
-    if (params.cfgIntervalStart !== undefined && params.cfgIntervalStart > 0) {
-      args.push('--cfg-interval-start', String(params.cfgIntervalStart));
-    }
-    if (params.cfgIntervalEnd !== undefined && params.cfgIntervalEnd < 1.0) {
-      args.push('--cfg-interval-end', String(params.cfgIntervalEnd));
-    }
-
-    // Run the Python script
     const result = await runPythonGeneration(args);
 
     if (!result.success) {
@@ -392,7 +618,6 @@ async function processGeneration(
       throw new Error('No audio files generated');
     }
 
-    // Copy audio files to public directory and build URLs
     const audioUrls: string[] = [];
     let actualDuration = 0;
     for (const srcPath of result.audio_paths) {
@@ -403,7 +628,6 @@ async function processGeneration(
       await mkdir(AUDIO_DIR, { recursive: true });
       await copyFile(srcPath, destPath);
 
-      // Get actual audio duration from first file
       if (audioUrls.length === 0) {
         actualDuration = getAudioDuration(destPath);
       }
@@ -411,14 +635,12 @@ async function processGeneration(
       audioUrls.push(`/audio/${filename}`);
     }
 
-    // Clean up job-specific output directory
     try {
       await rm(jobOutputDir, { recursive: true, force: true });
     } catch (cleanupError) {
       console.warn(`Job ${jobId}: Failed to cleanup output dir`, cleanupError);
     }
 
-    // Use actual duration, or fall back to params if > 0, otherwise default to 60
     const finalDuration = actualDuration > 0 ? actualDuration : (params.duration && params.duration > 0 ? params.duration : 60);
 
     job.status = 'succeeded';
@@ -438,7 +660,6 @@ async function processGeneration(
     job.status = 'failed';
     job.error = error instanceof Error ? error.message : 'Generation failed';
 
-    // Try to clean up job output directory on failure too
     try {
       const jobOutputDir = path.join(ACESTEP_DIR, 'output', jobId);
       await rm(jobOutputDir, { recursive: true, force: true });

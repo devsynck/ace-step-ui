@@ -15,8 +15,10 @@ import {
   getJobRawResponse,
   downloadAudioToBuffer,
   resolvePythonPath,
+  ACESTEP_DIR,
 } from '../services/acestep.js';
 import { getStorageProvider } from '../services/storage/factory.js';
+import { config } from '../config/index.js';
 
 const router = Router();
 
@@ -566,7 +568,7 @@ router.get('/health', async (_req, res: Response) => {
 router.get('/limits', async (_req, res: Response) => {
   try {
     const { spawn } = await import('child_process');
-    const ACESTEP_DIR = process.env.ACESTEP_PATH || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../ACE-Step-1.5');
+    // Use ACESTEP_DIR from acestep.ts (already resolved)
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = path.dirname(__filename);
     const SCRIPTS_DIR = path.join(__dirname, '../../scripts');
@@ -631,93 +633,87 @@ router.get('/debug/:taskId', authMiddleware, async (req: AuthenticatedRequest, r
 });
 
 // Format endpoint - uses LLM to enhance style/lyrics
+// Proxies to Python backend's /format_input endpoint
 router.post('/format', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { caption, lyrics, bpm, duration, keyScale, timeSignature, temperature, topK, topP, lmModel, lmBackend } = req.body;
+    const { caption, lyrics, bpm, duration, keyScale, timeSignature, temperature, topK, topP, lmModel, lmBackend, vocalLanguage } = req.body;
 
     if (!caption) {
       res.status(400).json({ error: 'Caption/style is required' });
       return;
     }
 
-    const { spawn } = await import('child_process');
+    console.log('[Format] Proxying to Python backend at', config.acestep.apiUrl);
 
-    const ACESTEP_DIR = process.env.ACESTEP_PATH || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../ACE-Step-1.5');
-    const __filename = fileURLToPath(import.meta.url);
-    const __dirname = path.dirname(__filename);
-    const SCRIPTS_DIR = path.join(__dirname, '../../scripts');
-    const FORMAT_SCRIPT = path.join(SCRIPTS_DIR, 'format_sample.py');
-    const pythonPath = resolvePythonPath(ACESTEP_DIR);
+    // Transform request format to match Python backend expectations
+    // Frontend sends: caption, lyrics, bpm, duration, keyScale, timeSignature, etc.
+    // Python backend expects: prompt, param_obj (JSON string)
+    const paramObj: Record<string, any> = {};
+    if (duration && duration > 0) paramObj.duration = duration;
+    if (bpm && bpm > 0) paramObj.bpm = bpm;
+    if (keyScale) paramObj.key = keyScale;  // renamed from keyScale
+    if (timeSignature) paramObj.time_signature = timeSignature;
+    if (vocalLanguage) paramObj.language = vocalLanguage;
 
-    const args = [
-      FORMAT_SCRIPT,
-      '--caption', caption,
-      '--json',
-    ];
+    const transformedBody = {
+      prompt: caption,  // renamed from caption
+      lyrics: lyrics || '',
+      temperature: temperature ?? 0.7,
+      top_k: topK,
+      top_p: topP,
+      lm_model: lmModel,
+      lm_backend: lmBackend,
+      param_obj: Object.keys(paramObj).length > 0 ? JSON.stringify(paramObj) : undefined,
+    };
 
-    if (lyrics) args.push('--lyrics', lyrics);
-    if (bpm && bpm > 0) args.push('--bpm', String(bpm));
-    if (duration && duration > 0) args.push('--duration', String(duration));
-    if (keyScale) args.push('--key-scale', keyScale);
-    if (timeSignature) args.push('--time-signature', timeSignature);
-    if (temperature !== undefined) args.push('--temperature', String(temperature));
-    if (topK && topK > 0) args.push('--top-k', String(topK));
-    if (topP !== undefined) args.push('--top-p', String(topP));
-    if (lmModel) args.push('--lm-model', lmModel);
-    if (lmBackend) args.push('--lm-backend', lmBackend);
-
-    console.log(`[Format] Running: ${pythonPath} ${args.join(' ')}`);
-    console.log(`[Format] CWD: ${ACESTEP_DIR}`);
-    const result = await new Promise<{ success: boolean; data?: any; error?: string }>((resolve) => {
-      const proc = spawn(pythonPath, args, {
-        cwd: ACESTEP_DIR,
-        env: {
-          ...process.env,
-          ACESTEP_PATH: ACESTEP_DIR,
-        },
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      proc.stdout.on('data', (data) => { stdout += data.toString(); });
-      proc.stderr.on('data', (data) => { stderr += data.toString(); });
-
-      proc.on('close', (code) => {
-        if (code === 0 && stdout) {
-          // stdout may contain log lines before the JSON — extract last JSON line
-          const lines = stdout.trim().split('\n');
-          let jsonStr = '';
-          for (let i = lines.length - 1; i >= 0; i--) {
-            if (lines[i].startsWith('{')) { jsonStr = lines[i]; break; }
-          }
-          try {
-            const parsed = JSON.parse(jsonStr || stdout);
-            resolve({ success: true, data: parsed });
-          } catch {
-            console.error('[Format] Failed to parse stdout:', stdout.slice(0, 500));
-            resolve({ success: false, error: 'Failed to parse format result' });
-          }
-        } else {
-          console.error(`[Format] Process exited with code ${code}`);
-          if (stdout) console.error('[Format] stdout:', stdout.slice(0, 1000));
-          if (stderr) console.error('[Format] stderr:', stderr.slice(0, 1000));
-          resolve({ success: false, error: stderr || stdout || `Format process exited with code ${code}` });
-        }
-      });
-
-      proc.on('error', (err) => {
-        console.error('[Format] Spawn error:', err.message);
-        resolve({ success: false, error: err.message });
-      });
+    // Remove undefined values
+    Object.keys(transformedBody).forEach(key => {
+      if ((transformedBody as any)[key] === undefined) {
+        delete (transformedBody as any)[key];
+      }
     });
 
-    if (result.success && result.data) {
-      res.json(result.data);
-    } else {
-      console.error('[Format] Python error:', result.error);
-      res.status(500).json({ success: false, error: result.error });
+    console.log('[Format] Request body:', JSON.stringify(transformedBody, null, 2));
+
+    // Proxy to Python backend
+    const response = await fetch(`${config.acestep.apiUrl}/format_input`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(transformedBody),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[Format] Python backend error:', response.status, errorText);
+      res.status(response.status).json({
+        error: `Python backend error: ${response.status}`,
+        details: errorText,
+      });
+      return;
     }
+
+    const response_data = await response.json();
+    console.log('[Format] Python backend response:', response_data);
+
+    // The Python backend wraps responses in { data: {...}, code: 200, error: null, ... }
+    // Extract the actual data from the response
+    const data = response_data.data || response_data;
+
+    // The frontend expects: { success: true, caption, lyrics, bpm, key_scale, time_signature, duration, language }
+    // Add success field to match frontend expectations
+    res.json({
+      success: true,
+      caption: data.caption,
+      lyrics: data.lyrics,
+      bpm: data.bpm,
+      duration: data.duration,
+      key_scale: data.key_scale,
+      time_signature: data.time_signature,
+      // Map vocal_language to language for frontend compatibility
+      language: data.vocal_language || data.language,
+    });
   } catch (error) {
     console.error('[Format] Route error:', error);
     res.status(500).json({ error: (error as Error).message });

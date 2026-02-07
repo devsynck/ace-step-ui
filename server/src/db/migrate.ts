@@ -124,6 +124,21 @@ CREATE TABLE IF NOT EXISTS contact_submissions (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- AI Providers table (for custom AI provider configuration)
+CREATE TABLE IF NOT EXISTS ai_providers (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  provider_type TEXT NOT NULL,
+  api_key TEXT,
+  api_url TEXT,
+  model TEXT,
+  headers TEXT,
+  is_default INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_songs_user_id ON songs(user_id);
 CREATE INDEX IF NOT EXISTS idx_songs_created_at ON songs(created_at);
@@ -139,6 +154,7 @@ CREATE INDEX IF NOT EXISTS idx_followers_follower ON followers(follower_id);
 CREATE INDEX IF NOT EXISTS idx_followers_following ON followers(following_id);
 CREATE INDEX IF NOT EXISTS idx_reference_tracks_user_id ON reference_tracks(user_id);
 CREATE INDEX IF NOT EXISTS idx_reference_tracks_created_at ON reference_tracks(created_at);
+CREATE INDEX IF NOT EXISTS idx_ai_providers_user_id ON ai_providers(user_id);
 `;
 
 function migrate(): void {

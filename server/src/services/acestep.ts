@@ -30,11 +30,16 @@ const ACESTEP_API = config.acestep.apiUrl;
 // Resolve ACE-Step path (from env or default relative path)
 function resolveAceStepPath(): string {
   const envPath = process.env.ACESTEP_PATH;
+  console.log('[acestep.ts] ACESTEP_PATH from env:', envPath);
   if (envPath) {
-    return path.isAbsolute(envPath) ? envPath : path.resolve(process.cwd(), envPath);
+    const resolved = path.isAbsolute(envPath) ? envPath : path.resolve(process.cwd(), envPath);
+    console.log('[acestep.ts] Resolved ACESTEP_DIR:', resolved);
+    return resolved;
   }
-  // Default: sibling directory
-  return path.resolve(__dirname, '../../../../ACE-Step-1.5');
+  // Default: sibling directory (go up 5 levels from server/src/services to workspace root)
+  const fallback = path.resolve(__dirname, '../../../../../ACE-Step-1.5');
+  console.log('[acestep.ts] Using fallback path:', fallback);
+  return fallback;
 }
 
 // Resolve Python path cross-platform (supports venv and portable installations)
@@ -44,25 +49,36 @@ export function resolvePythonPath(baseDir: string): string {
     return process.env.PYTHON_PATH;
   }
 
+  // Normalize baseDir to absolute path for reliable file checking
+  const absoluteBaseDir = path.isAbsolute(baseDir) ? baseDir : path.resolve(process.cwd(), baseDir);
+
   const isWindows = process.platform === 'win32';
   const pythonExe = isWindows ? 'python.exe' : 'python';
 
   // Check for portable installation first (python_embeded)
-  const portablePath = path.join(baseDir, 'python_embeded', pythonExe);
+  const portablePath = path.join(absoluteBaseDir, 'python_embeded', pythonExe);
+  console.log('[resolvePythonPath] baseDir:', baseDir);
+  console.log('[resolvePythonPath] absoluteBaseDir:', absoluteBaseDir);
+  console.log('[resolvePythonPath] portablePath:', portablePath, 'exists:', existsSync(portablePath));
   if (existsSync(portablePath)) {
+    console.log('[resolvePythonPath] Using portable Python:', portablePath);
     return portablePath;
   }
 
   // Standard venv path (different structure on Windows vs Unix)
-  if (isWindows) {
-    return path.join(baseDir, '.venv', 'Scripts', pythonExe);
-  }
-  return path.join(baseDir, '.venv', 'bin', 'python');
+  const venvPath = isWindows
+    ? path.join(absoluteBaseDir, '.venv', 'Scripts', pythonExe)
+    : path.join(absoluteBaseDir, '.venv', 'bin', 'python');
+  console.log('[resolvePythonPath] Using venv Python:', venvPath);
+  return venvPath;
 }
 
 const ACESTEP_DIR = resolveAceStepPath();
 const SCRIPTS_DIR = path.join(__dirname, '../../scripts');
 const PYTHON_SCRIPT = path.join(SCRIPTS_DIR, 'simple_generate.py');
+
+// Export ACESTEP_DIR for use in other modules
+export { ACESTEP_DIR };
 
 // Cache API availability status (check once, remember for session)
 let apiAvailableCache: boolean | null = null;

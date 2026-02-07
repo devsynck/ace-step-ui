@@ -1,5 +1,5 @@
 import React from 'react';
-import { Library, Disc, Search, User, LogIn, LogOut, Sun, Moon } from 'lucide-react';
+import { Library, Disc, Search, User, LogIn, LogOut, Sun, Moon, Settings } from 'lucide-react';
 import { View } from '../types';
 
 interface SidebarProps {
@@ -69,10 +69,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
           {user ? (
             <div className="flex flex-col items-center gap-2">
+              <button
+                onClick={() => onNavigate('settings')}
+                className="w-8 h-8 rounded-full hover:bg-zinc-100 dark:hover:bg-white/10 flex items-center justify-center text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white transition-colors"
+                title="AI Provider Settings"
+              >
+                <Settings size={16} />
+              </button>
               <div
                 onClick={onOpenSettings}
                 className="w-8 h-8 rounded-full bg-gradient-to-br from-pink-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold cursor-pointer border border-white/20 hover:scale-110 transition-transform overflow-hidden"
-                title={`${user.username} - Settings`}
+                title={`${user.username} - Profile Settings`}
               >
                 {user.avatar_url ? (
                   <img src={user.avatar_url} alt={user.username} className="w-full h-full object-cover" />

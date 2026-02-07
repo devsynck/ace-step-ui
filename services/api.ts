@@ -471,3 +471,62 @@ export const contactApi = {
   submit: (data: ContactFormData): Promise<{ success: boolean; message: string; id: string }> =>
     api('/api/contact', { method: 'POST', body: data }),
 };
+
+// Settings API - AI Providers
+export type ProviderType = 'gemini' | 'ollama' | 'openai' | 'anthropic' | 'custom';
+
+export interface AIProvider {
+  id: string;
+  user_id: string;
+  name: string;
+  provider_type: ProviderType;
+  api_key?: string;
+  api_url?: string;
+  model?: string;
+  headers?: string | Record<string, string>;
+  is_default: number | boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateProviderParams {
+  name: string;
+  providerType: ProviderType;
+  apiKey?: string;
+  apiUrl?: string;
+  model?: string;
+  headers?: Record<string, string>;
+  isDefault?: boolean;
+}
+
+export interface TestProviderResult {
+  success: boolean;
+  message: string;
+  details?: any;
+}
+
+export const settingsApi = {
+  // Get all AI providers for the authenticated user
+  getProviders: (token: string): Promise<{ providers: AIProvider[] }> =>
+    api('/api/settings/providers', { token }),
+
+  // Add a new AI provider
+  addProvider: (params: CreateProviderParams, token: string): Promise<{ provider: AIProvider }> =>
+    api('/api/settings/providers', { method: 'POST', body: params, token }),
+
+  // Update an existing AI provider
+  updateProvider: (id: string, params: Partial<CreateProviderParams>, token: string): Promise<{ provider: AIProvider }> =>
+    api(`/api/settings/providers/${id}`, { method: 'PATCH', body: params, token }),
+
+  // Delete an AI provider
+  deleteProvider: (id: string, token: string): Promise<{ success: boolean }> =>
+    api(`/api/settings/providers/${id}`, { method: 'DELETE', token }),
+
+  // Set a provider as the default
+  setDefaultProvider: (id: string, token: string): Promise<{ provider: AIProvider }> =>
+    api(`/api/settings/providers/${id}/default`, { method: 'PATCH', token }),
+
+  // Test connection to a provider
+  testProvider: (id: string, token: string): Promise<TestProviderResult> =>
+    api(`/api/settings/providers/${id}/test`, { method: 'POST', token }),
+};

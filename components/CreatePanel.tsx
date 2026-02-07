@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Sparkles, ChevronDown, Settings2, Trash2, Music2, Sliders, Dices, Hash, RefreshCw, Plus, Upload, Play, Pause, Loader2 } from 'lucide-react';
 import { GenerationParams, Song } from '../types';
 import { useAuth } from '../context/AuthContext';
-import { generateApi } from '../services/api';
+import { generateApi, settingsApi, type AIProvider } from '../services/api';
+import { generateTitleWithProvider, generateTitle, type AISettings, type AIProviderType } from '../services/titleGenerationService';
 
 interface ReferenceTrack {
   id: string;
@@ -195,6 +196,9 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
   const [maxDurationWithLm, setMaxDurationWithLm] = useState(240);
   const [maxDurationWithoutLm, setMaxDurationWithoutLm] = useState(240);
 
+  // AI Providers for title generation
+  const [aiProviders, setAiProviders] = useState<AIProvider[]>([]);
+
   const [isUploadingReference, setIsUploadingReference] = useState(false);
   const [isUploadingSource, setIsUploadingSource] = useState(false);
   const [isTranscribingReference, setIsTranscribingReference] = useState(false);
@@ -202,6 +206,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isFormattingStyle, setIsFormattingStyle] = useState(false);
   const [isFormattingLyrics, setIsFormattingLyrics] = useState(false);
+  const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [dragKind, setDragKind] = useState<'file' | 'audio' | null>(null);
   const referenceInputRef = useRef<HTMLInputElement>(null);
@@ -283,6 +288,20 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
     );
     onAudioSelectionApplied?.();
   }, [pendingAudioSelection, onAudioSelectionApplied]);
+
+  // Load AI providers for title generation
+  useEffect(() => {
+    const loadProviders = async () => {
+      if (!token) return;
+      try {
+        const res = await settingsApi.getProviders(token);
+        setAiProviders(res.providers);
+      } catch (error) {
+        console.error('Failed to load AI providers:', error);
+      }
+    };
+    loadProviders();
+  }, [token]);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -453,7 +472,14 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
 
   // Format handler - uses LLM to enhance style/lyrics and auto-fill parameters
   const handleFormat = async (target: 'style' | 'lyrics') => {
-    if (!token || !style.trim()) return;
+    if (!token) {
+      alert('Please sign in to use the AI format feature.');
+      return;
+    }
+    if (!style.trim()) {
+      alert('Please enter a style description first (e.g., "upbeat pop rock").');
+      return;
+    }
     if (target === 'style') {
       setIsFormattingStyle(true);
     } else {
@@ -497,6 +523,71 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
       } else {
         setIsFormattingLyrics(false);
       }
+    }
+  };
+
+  const handleGenerateTitle = async () => {
+    // Try to use the default provider from the settings API
+    const defaultProvider = aiProviders.find(p => p.is_default);
+
+    if (!defaultProvider) {
+      // Fall back to localStorage for backward compatibility
+      const provider = localStorage.getItem('ace-ai-provider') as AIProviderType || 'gemini';
+      const ollamaModelFromStorage = localStorage.getItem('ace-ai-ollama-model');
+
+      const settings: AISettings = {
+        provider,
+        geminiApiKey: localStorage.getItem('ace-ai-gemini-key') || undefined,
+        geminiModel: localStorage.getItem('ace-ai-gemini-model') || undefined,
+        ollamaUrl: localStorage.getItem('ace-ai-ollama-url') || undefined,
+        ollamaModel: ollamaModelFromStorage || undefined,
+      };
+
+      const hasValidSettings = provider === 'gemini' ? settings.geminiApiKey : settings.ollamaModel;
+      if (!hasValidSettings) {
+        alert(`Please configure your ${provider === 'gemini' ? 'Gemini API key' : 'Ollama model'} in Settings first`);
+        return;
+      }
+
+      setIsGeneratingTitle(true);
+      try {
+        const result = await generateTitle(
+          { lyrics, style, customTitle: title },
+          settings
+        );
+
+        if (result.success && result.title) {
+          setTitle(result.title);
+        } else if (result.error) {
+          alert(result.error);
+        }
+      } catch (error) {
+        console.error('Title generation failed:', error);
+        alert('Failed to generate title. Please try again.');
+      } finally {
+        setIsGeneratingTitle(false);
+      }
+      return;
+    }
+
+    // Use the default provider from the settings API
+    setIsGeneratingTitle(true);
+    try {
+      const result = await generateTitleWithProvider(
+        { lyrics, style, customTitle: title },
+        defaultProvider
+      );
+
+      if (result.success && result.title) {
+        setTitle(result.title);
+      } else if (result.error) {
+        alert(result.error);
+      }
+    } catch (error) {
+      console.error('Title generation failed:', error);
+      alert('Failed to generate title. Please try again.');
+    } finally {
+      setIsGeneratingTitle(false);
     }
   };
 
@@ -1252,7 +1343,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                     {instrumental ? 'Instrumental' : 'Vocal'}
                   </button>
                   <button
-                    className={`p-1.5 hover:bg-zinc-200 dark:hover:bg-white/10 rounded transition-colors ${isFormattingLyrics ? 'text-pink-500' : 'text-zinc-500 hover:text-black dark:hover:text-white'}`}
+                    className={`p-1.5 hover:bg-zinc-200 dark:hover:bg-white/10 rounded transition-colors ${isFormattingLyrics ? 'text-pink-500' : 'text-zinc-500 hover:text-black dark:hover:text-white'} ${(!style.trim() || isFormattingLyrics) ? 'opacity-30 cursor-not-allowed' : ''}`}
                     title="AI Format - Enhance style & auto-fill parameters"
                     onClick={() => handleFormat('lyrics')}
                     disabled={isFormattingLyrics || !style.trim()}
@@ -1292,7 +1383,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                   <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">Genre, mood, instruments, vibe</p>
                 </div>
                 <button
-                  className={`p-1.5 hover:bg-zinc-200 dark:hover:bg-white/10 rounded transition-colors ${isFormattingStyle ? 'text-pink-500' : 'text-zinc-500 hover:text-black dark:hover:text-white'}`}
+                  className={`p-1.5 hover:bg-zinc-200 dark:hover:bg-white/10 rounded transition-colors ${isFormattingStyle ? 'text-pink-500' : 'text-zinc-500 hover:text-black dark:hover:text-white'} ${(!style.trim() || isFormattingStyle) ? 'opacity-30 cursor-not-allowed' : ''}`}
                   title="AI Format - Enhance style & auto-fill parameters"
                   onClick={() => handleFormat('style')}
                   disabled={isFormattingStyle || !style.trim()}
@@ -1321,8 +1412,18 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
 
             {/* Title Input */}
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
-              <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
-                Title
+              <div className="flex items-center justify-between px-3 py-2.5 bg-zinc-50 dark:bg-white/5 border-b border-zinc-100 dark:border-white/5">
+                <span className="text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Title</span>
+                <button
+                  className={`p-1.5 hover:bg-zinc-200 dark:hover:bg-white/10 rounded transition-colors ${
+                    isGeneratingTitle ? 'text-pink-500' : 'text-zinc-500 hover:text-black dark:hover:text-white'
+                  }`}
+                  title="AI Generate Title - Create title based on lyrics and style"
+                  onClick={handleGenerateTitle}
+                  disabled={isGeneratingTitle}
+                >
+                  {isGeneratingTitle ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                </button>
               </div>
               <input
                 type="text"

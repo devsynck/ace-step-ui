@@ -148,5 +148,22 @@ export interface UserProfile {
   };
 }
 
+// AI Provider types
+export type ProviderType = 'gemini' | 'ollama' | 'openai' | 'anthropic' | 'custom';
+
+export interface AIProvider {
+  id: string;
+  userId: string;
+  name: string;
+  providerType: ProviderType;
+  apiKey?: string;
+  apiUrl?: string;
+  model?: string;
+  headers?: Record<string, string>;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // Simplified views for ACE-Step UI
-export type View = 'create' | 'library' | 'profile' | 'song' | 'playlist' | 'search';
+export type View = 'create' | 'library' | 'profile' | 'song' | 'playlist' | 'search' | 'settings';

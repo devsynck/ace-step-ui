@@ -23,6 +23,7 @@ if [ ! -d "server/node_modules" ]; then
 fi
 
 # Get ACE-Step path from environment or use default
+# Default is sibling to ace-step-ui-main (go up 1 level)
 ACESTEP_PATH="${ACESTEP_PATH:-../ACE-Step-1.5}"
 
 # Check if ACE-Step exists

@@ -24,9 +24,13 @@ if not exist "server\node_modules" (
 )
 
 REM Get ACE-Step path from environment or use default
+REM Default is sibling to ace-step-ui-main (go up 1 level)
 if "%ACESTEP_PATH%"=="" (
     set ACESTEP_PATH=..\ACE-Step-1.5
 )
+
+REM Resolve to absolute path for child processes
+for %%i in ("%ACESTEP_PATH%") do set "ACESTEP_PATH=%%~fi"
 
 REM Check if ACE-Step exists
 if not exist "%ACESTEP_PATH%" (

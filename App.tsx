@@ -11,6 +11,7 @@ import { UsernameModal } from './components/UsernameModal';
 import { UserProfile } from './components/UserProfile';
 import { SettingsModal } from './components/SettingsModal';
 import { SongProfile } from './components/SongProfile';
+import { SettingsView } from './components/SettingsView';
 import { Song, GenerationParams, View, Playlist } from './types';
 import { generateApi, songsApi, playlistsApi, getAudioUrl } from './services/api';
 import { useAuth } from './context/AuthContext';
@@ -259,6 +260,8 @@ export default function App() {
         }
       } else if (path === '/search') {
         setCurrentView('search');
+      } else if (path === '/settings') {
+        setCurrentView('settings');
       }
     };
 
@@ -1208,6 +1211,16 @@ export default function App() {
           />
         );
 
+      case 'settings':
+        return (
+          <SettingsView
+            onBack={() => {
+              setCurrentView('create');
+              window.history.pushState({}, '', '/');
+            }}
+          />
+        );
+
       case 'create':
       default:
         return (
@@ -1296,7 +1309,7 @@ export default function App() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-white dark:bg-suno-DEFAULT text-zinc-900 dark:text-white font-sans antialiased selection:bg-pink-500/30 transition-colors duration-300">
+    <div className="flex flex-col h-screen bg-white dark:bg-zinc-900 text-zinc-900 dark:text-white font-sans antialiased selection:bg-pink-500/30 transition-colors duration-300">
       <div className="flex-1 flex overflow-hidden">
         <Sidebar
           currentView={currentView}
@@ -1309,6 +1322,8 @@ export default function App() {
               window.history.pushState({}, '', '/library');
             } else if (v === 'search') {
               window.history.pushState({}, '', '/search');
+            } else if (v === 'settings') {
+              window.history.pushState({}, '', '/settings');
             }
           }}
           theme={theme}

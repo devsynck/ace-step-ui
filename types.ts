@@ -13,6 +13,7 @@ export interface Song {
   generationParams?: any;
   tags: string[];
   audioUrl?: string;
+  videoUrl?: string; // URL of the generated video for YouTube upload
   isPublic?: boolean;
   likeCount?: number;
   viewCount?: number;
@@ -166,4 +167,101 @@ export interface AIProvider {
 }
 
 // Simplified views for ACE-Step UI
-export type View = 'create' | 'library' | 'profile' | 'song' | 'playlist' | 'search' | 'settings';
+export type View = 'create' | 'library' | 'profile' | 'song' | 'playlist' | 'search' | 'settings' | 'youtube_studio';
+
+// YouTube Studio types
+export type YouTubeVisibilityStatus = 'public' | 'private' | 'unlisted';
+
+export interface YouTubeMetadata {
+  title: string;
+  description: string;
+  tags: string[];
+  visibility: YouTubeVisibilityStatus;
+}
+
+// Video Project types
+export type VideoProjectState =
+  | 'not_started'     // No render initiated
+  | 'rendering'       // Server is rendering video
+  | 'completed'       // Render complete, ready for upload
+  | 'uploading'       // Uploading to YouTube
+  | 'uploaded'        // Successfully uploaded
+  | 'failed'          // Render or upload failed
+  | 'cancelled';      // User cancelled
+
+export type VideoRenderStage =
+  | 'idle'
+  | 'queued'
+  | 'initializing'
+  | 'processing'
+  | 'encoding'
+  | 'finalizing';
+
+export interface VideoProject {
+  id: string;
+  songId: string;
+  userId: string;
+  state: VideoProjectState;
+  renderStage?: VideoRenderStage;
+  progress: number;              // 0-100
+  videoUrl?: string;             // Rendered video URL
+  errorMessage?: string;
+
+  // Video config (from VideoGeneratorModal)
+  config: {
+    preset: string;
+    visualizer: string;
+    effects: Record<string, any>;
+    intensities: Record<string, number>;
+    textLayers: any[];
+    backgroundType: 'gradient' | 'image' | 'video';
+    customImage?: string;
+    customAlbumArt?: string;
+    videoUrl?: string;
+  };
+
+  // YouTube metadata
+  youtubeMetadata?: {
+    title: string;
+    description: string;
+    tags: string[];
+    visibility: 'public' | 'private' | 'unlisted';
+  };
+
+  // Upload tracking
+  uploadProgress?: number;
+  youtubeVideoId?: string;
+  youtubeVideoUrl?: string;
+
+  // Job IDs for polling
+  renderJobId?: string;
+  uploadJobId?: string;
+
+  // Timestamps
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface YouTubeUploadRequest {
+  accessToken: string;
+  videoUrl: string;
+  metadata: YouTubeMetadata;
+}
+
+export interface YouTubeUploadResponse {
+  success: boolean;
+  videoId?: string;
+  error?: string;
+  quotaWarning?: string;
+}
+
+export interface GoogleOAuthUser {
+  sub: string;
+  name: string;
+  given_name: string;
+  family_name: string;
+  picture: string;
+  email: string;
+  email_verified: boolean;
+}

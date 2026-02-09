@@ -530,3 +530,138 @@ export const settingsApi = {
   testProvider: (id: string, token: string): Promise<TestProviderResult> =>
     api(`/api/settings/providers/${id}/test`, { method: 'POST', token }),
 };
+
+// YouTube API
+export interface YouTubeUploadParams {
+  accessToken: string;
+  videoUrl: string;
+  metadata: {
+    title: string;
+    description: string;
+    tags: string[];
+    visibility: 'public' | 'private' | 'unlisted';
+  };
+}
+
+export interface YouTubeUploadResult {
+  success: boolean;
+  videoId?: string;
+  videoUrl?: string;
+  quotaWarning?: string;
+  error?: string;
+}
+
+export interface YouTubeQuotaInfo {
+  dailyQuota: number;
+  uploadCost: number;
+  maxUploadsPerDay: number;
+  warning: string;
+}
+
+export const youtubeApi = {
+  // Upload a video to YouTube
+  uploadVideo: (params: YouTubeUploadParams, appToken?: string | null): Promise<YouTubeUploadResult> =>
+    api('/api/youtube/upload', {
+      method: 'POST',
+      body: {
+        accessToken: params.accessToken,
+        videoUrl: params.videoUrl,
+        metadata: params.metadata
+      },
+      token: appToken // Use app token for Authorization header, YouTube token stays in body
+    }),
+
+  // Get YouTube API quota information
+  getQuotaInfo: (): Promise<YouTubeQuotaInfo> =>
+    api('/api/youtube/quota-info'),
+};
+
+// Video Projects API
+export interface VideoProjectConfig {
+  preset: string;
+  visualizer: string;
+  effects: Record<string, any>;
+  intensities: Record<string, number>;
+  textLayers: any[];
+  backgroundType: 'gradient' | 'image' | 'video';
+  customImage?: string;
+  customAlbumArt?: string;
+  videoUrl?: string;
+}
+
+export interface CreateVideoProjectParams {
+  songId: string;
+  config: VideoProjectConfig;
+}
+
+export interface PublishVideoProjectParams {
+  youtubeVideoId: string;
+  youtubeVideoUrl?: string;
+  metadata: {
+    title: string;
+    description: string;
+    tags: string[];
+    visibility: 'public' | 'private' | 'unlisted';
+  };
+}
+
+export const videoProjectsApi = {
+  // Get all video projects for the user
+  getProjects: (token: string): Promise<{ projects: any[] }> =>
+    api('/api/video-projects', { token }),
+
+  // Get a single video project
+  getProject: (id: string, token: string): Promise<{ project: any }> =>
+    api(`/api/video-projects/${id}`, { token }),
+
+  // Create a new video project
+  createProject: (params: CreateVideoProjectParams, token: string): Promise<{ project: any }> =>
+    api('/api/video-projects', { method: 'POST', body: params, token }),
+
+  // Start rendering a video project
+  startRender: (id: string, token: string): Promise<{ jobId: string }> =>
+    api(`/api/video-projects/${id}/render`, { method: 'POST', token }),
+
+  // Get the status of a video project
+  getStatus: (id: string, token: string): Promise<{ project: any }> =>
+    api(`/api/video-projects/${id}/status`, { token }),
+
+  // Mark a video project as completed
+  completeProject: (id: string, videoUrl: string, token: string): Promise<{ project: any }> =>
+    api(`/api/video-projects/${id}/complete`, { method: 'POST', body: { videoUrl }, token }),
+
+  // Update project with YouTube publish info
+  publishProject: (id: string, params: PublishVideoProjectParams, token: string): Promise<{ project: any }> =>
+    api(`/api/video-projects/${id}/publish`, { method: 'POST', body: params, token }),
+
+  // Delete a video project
+  deleteProject: (id: string, token: string): Promise<{ success: boolean }> =>
+    api(`/api/video-projects/${id}`, { method: 'DELETE', token }),
+
+  // Update render progress (for client-side rendering)
+  updateProgress: async (id: string, stage: string, progress: number, token: string, errorMessage?: string): Promise<{ success: boolean }> =>
+    api(`/api/video-projects/${id}/progress`, { method: 'POST', body: { stage, progress, errorMessage }, token }),
+
+  // Upload rendered video (for client-side rendering)
+  uploadVideo: async (id: string, videoBlob: Blob, token: string): Promise<{ project: any }> => {
+    const formData = new FormData();
+    formData.append('video', videoBlob, `${id}.mp4`);
+
+    const response = await fetch(`${API_BASE}/api/video-projects/${id}/upload`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Upload failed' }));
+      throw new Error(error.error || 'Upload failed');
+    }
+
+    return response.json();
+  },
+
+  // Mark a video project as failed
+  markFailed: async (id: string, errorMessage: string, token: string): Promise<{ success: boolean }> =>
+    api(`/api/video-projects/${id}/progress`, { method: 'POST', body: { stage: 'failed', progress: 0, errorMessage }, token }),
+};

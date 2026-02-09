@@ -94,3 +94,6 @@ wavacity-editor/
 
 # Script logs
 logs/
+
+server/public/*
+server/server/*

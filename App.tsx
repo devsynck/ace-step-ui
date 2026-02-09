@@ -7,13 +7,15 @@ import { Player } from './components/Player';
 import { LibraryView } from './components/LibraryView';
 import { CreatePlaylistModal, AddToPlaylistModal } from './components/PlaylistModals';
 import { VideoGeneratorModal } from './components/VideoGeneratorModal';
+import { YouTubeStudio } from './components/YouTubeStudio';
+import { YouTubeStudioView } from './components/YouTubeStudioView';
 import { UsernameModal } from './components/UsernameModal';
 import { UserProfile } from './components/UserProfile';
 import { SettingsModal } from './components/SettingsModal';
 import { SongProfile } from './components/SongProfile';
 import { SettingsView } from './components/SettingsView';
-import { Song, GenerationParams, View, Playlist } from './types';
-import { generateApi, songsApi, playlistsApi, getAudioUrl } from './services/api';
+import { Song, GenerationParams, View, Playlist, VideoProject, YouTubeMetadata } from './types';
+import { generateApi, songsApi, playlistsApi, getAudioUrl, videoProjectsApi, youtubeApi } from './services/api';
 import { useAuth } from './context/AuthContext';
 import { useResponsive } from './context/ResponsiveContext';
 import { List } from 'lucide-react';
@@ -81,6 +83,19 @@ export default function App() {
   const [isVideoModalOpen, setIsVideoModalOpen] = useState(false);
   const [songForVideo, setSongForVideo] = useState<Song | null>(null);
 
+  // YouTube Studio Modal
+  const [isYouTubeStudioOpen, setIsYouTubeStudioOpen] = useState(false);
+  const [youtubeVideoUrl, setYoutubeVideoUrl] = useState<string>('');
+  const [songForYouTube, setSongForYouTube] = useState<Song | null>(null);
+
+  // YouTube Studio View
+  const [youtubeStudioMode, setYouTubeStudioMode] = useState<'upload' | 'create' | null>(null);
+  const [selectedSongForVideo, setSelectedSongForVideo] = useState<Song | null>(null);
+  const [generatedVideos, setGeneratedVideos] = useState<Map<string, string>>(new Map());
+
+  // Video Projects State
+  const [videoProjects, setVideoProjects] = useState<VideoProject[]>([]);
+
   // Settings Modal
   const [showSettingsModal, setShowSettingsModal] = useState(false);
 
@@ -144,6 +159,15 @@ export default function App() {
         .catch(err => console.error('Failed to load playlists', err));
     } else {
       setPlaylists([]);
+    }
+  }, [token]);
+
+  // Load Video Projects when authenticated
+  useEffect(() => {
+    if (token) {
+      loadVideoProjects();
+    } else {
+      setVideoProjects([]);
     }
   }, [token]);
 
@@ -262,6 +286,9 @@ export default function App() {
         setCurrentView('search');
       } else if (path === '/settings') {
         setCurrentView('settings');
+      } else if (path === '/youtube-studio') {
+        setCurrentView('youtube_studio');
+        setYouTubeStudioMode('upload');
       }
     };
 
@@ -1121,6 +1148,147 @@ export default function App() {
     setIsVideoModalOpen(true);
   };
 
+  const openYouTubeStudio = (videoUrl: string, song?: Song) => {
+    setYoutubeVideoUrl(videoUrl);
+    setSongForYouTube(song || null);
+    setIsYouTubeStudioOpen(true);
+  };
+
+  const handleYouTubeUploadSuccess = (videoId: string) => {
+    showToast('Video published to YouTube!', 'success');
+    console.log('YouTube video ID:', videoId);
+  };
+
+  const onVideoGenerated = (songId: string, videoUrl: string) => {
+    setGeneratedVideos(prev => new Map(prev).set(songId, videoUrl));
+    // Update song in database
+    if (token) {
+      songsApi.updateSong(songId, { video_url: videoUrl }, token).catch(err => {
+        console.error('Failed to update song with video URL:', err);
+      });
+    }
+    showToast('Video generated successfully!', 'success');
+  };
+
+  // Video Projects Handlers
+  const loadVideoProjects = async () => {
+    if (!token) return;
+    try {
+      const { projects } = await videoProjectsApi.getProjects(token);
+      setVideoProjects(projects || []);
+    } catch (error) {
+      console.error('Failed to load video projects:', error);
+    }
+  };
+
+  const createVideoProject = async (songId: string, config: any, force: boolean = false): Promise<string | undefined> => {
+    if (!token) return;
+    try {
+      const { project } = await videoProjectsApi.createProject({ songId, config, force }, token);
+      // Add project to state
+      setVideoProjects(prev => [project, ...prev]);
+      showToast('Video project created! Starting render...', 'success');
+
+      // For client-side background rendering, just mark as rendering
+      // The actual rendering will be done by the VideoGeneratorModal component
+      setVideoProjects(prev => prev.map(p =>
+        p.id === project.id ? { ...p, state: 'rendering' as const, progress: 0 } : p
+      ));
+
+      // Return projectId for background rendering
+      return project.id;
+    } catch (error) {
+      console.error('Failed to create video project:', error);
+      showToast('Failed to create video project', 'error');
+      return undefined;
+    }
+  };
+
+  const renderVideoProject = async (projectId: string) => {
+    if (!token) return;
+    try {
+      await videoProjectsApi.startRender(projectId, token);
+      // Update local state to show rendering
+      setVideoProjects(prev => prev.map(p =>
+        p.id === projectId ? { ...p, state: 'rendering' as const, progress: 0 } : p
+      ));
+      showToast('Video rendering started...', 'success');
+    } catch (error) {
+      console.error('Failed to start video render:', error);
+      showToast('Failed to start video render', 'error');
+    }
+  };
+
+  const publishVideoProject = async (projectId: string, metadata: YouTubeMetadata, accessToken: string) => {
+    if (!token) return;
+    try {
+      // Update state to uploading
+      setVideoProjects(prev => prev.map(p =>
+        p.id === projectId ? { ...p, state: 'uploading' as const, youtubeMetadata: metadata } : p
+      ));
+
+      // Call YouTube upload API
+      const project = videoProjects.find(p => p.id === projectId);
+      if (!project?.videoUrl) {
+        throw new Error('No video URL found for project');
+      }
+
+      const result = await youtubeApi.uploadVideo({
+        accessToken,
+        videoUrl: project.videoUrl,
+        metadata,
+      }, token);
+
+      if (result.success && result.videoId) {
+        // Update project with YouTube info
+        await videoProjectsApi.publishProject(
+          projectId,
+          {
+            youtubeVideoId: result.videoId,
+            youtubeVideoUrl: result.videoUrl,
+            metadata,
+          },
+          token
+        );
+
+        // Update local state
+        setVideoProjects(prev => prev.map(p =>
+          p.id === projectId
+            ? {
+                ...p,
+                state: 'uploaded' as const,
+                youtubeVideoId: result.videoId,
+                youtubeVideoUrl: result.videoUrl,
+              }
+            : p
+        ));
+
+        showToast('Video published to YouTube!', 'success');
+      } else {
+        throw new Error(result.error || 'Upload failed');
+      }
+    } catch (error) {
+      console.error('Failed to publish video:', error);
+      setVideoProjects(prev => prev.map(p =>
+        p.id === projectId ? { ...p, state: 'failed' as const, errorMessage: error instanceof Error ? error.message : 'Unknown error' } : p
+      ));
+      showToast('Failed to publish video', 'error');
+      throw error;
+    }
+  };
+
+  const deleteVideoProject = async (projectId: string) => {
+    if (!token) return;
+    try {
+      await videoProjectsApi.deleteProject(projectId, token);
+      setVideoProjects(prev => prev.filter(p => p.id !== projectId));
+      showToast('Video project deleted', 'success');
+    } catch (error) {
+      console.error('Failed to delete video project:', error);
+      showToast('Failed to delete video project', 'error');
+    }
+  };
+
   // Handle username setup
   const handleUsernameSubmit = async (username: string) => {
     await setupUser(username);
@@ -1208,6 +1376,25 @@ export default function App() {
             onNavigateToProfile={handleNavigateToProfile}
             onNavigateToSong={handleNavigateToSong}
             onNavigateToPlaylist={handleNavigateToPlaylist}
+          />
+        );
+
+      case 'youtube_studio':
+        return (
+          <YouTubeStudioView
+            songs={songs.filter(s => s.userId === user?.id)}
+            user={user}
+            token={token}
+            videoProjects={videoProjects}
+            onNavigateBack={() => {
+              setCurrentView('create');
+              window.history.pushState({}, '', '/');
+            }}
+            loadVideoProjects={loadVideoProjects}
+            createVideoProject={createVideoProject}
+            renderVideoProject={renderVideoProject}
+            publishVideoProject={publishVideoProject}
+            deleteVideoProject={deleteVideoProject}
           />
         );
 
@@ -1324,6 +1511,8 @@ export default function App() {
               window.history.pushState({}, '', '/search');
             } else if (v === 'settings') {
               window.history.pushState({}, '', '/settings');
+            } else if (v === 'youtube_studio') {
+              window.history.pushState({}, '', '/youtube-studio');
             }
           }}
           theme={theme}
@@ -1388,6 +1577,16 @@ export default function App() {
         isOpen={isVideoModalOpen}
         onClose={() => setIsVideoModalOpen(false)}
         song={songForVideo}
+        onPublishToYouTube={openYouTubeStudio}
+        onCreateVideoProject={createVideoProject}
+        token={token}
+      />
+      <YouTubeStudio
+        isOpen={isYouTubeStudioOpen}
+        onClose={() => setIsYouTubeStudioOpen(false)}
+        videoUrl={youtubeVideoUrl}
+        song={songForYouTube}
+        onSuccess={handleYouTubeUploadSuccess}
       />
       <UsernameModal
         isOpen={showUsernameModal}

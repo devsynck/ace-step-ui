@@ -1,14 +1,22 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { Song } from '../types';
-import { X, Play, Pause, Download, Wand2, Image as ImageIcon, Music, Video, Loader2, Palette, Layers, Zap, Type, Monitor, Aperture, Activity, Circle, Grid, Box, BarChart2, Waves, Disc, Upload, Plus, Trash2, Settings2, MousePointer2, Search, ExternalLink, Sun, Film, Minus } from 'lucide-react';
+import { X, Play, Pause, Download, Wand2, Image as ImageIcon, Music, Video, Loader2, Palette, Layers, Zap, Type, Monitor, Aperture, Activity, Circle, Grid, Box, BarChart2, Waves, Disc, Upload, Plus, Trash2, Settings2, MousePointer2, Search, ExternalLink, Sun, Film, Minus, Youtube } from 'lucide-react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { useResponsive } from '../context/ResponsiveContext';
+import { videoProjectsApi } from '../services/api';
 
 interface VideoGeneratorModalProps {
   isOpen: boolean;
   onClose: () => void;
   song: Song | null;
+  songs?: Song[]; // For song selector in background mode
+  onPublishToYouTube?: (videoUrl: string, song?: Song) => void;
+  backgroundMode?: boolean; // If true, create project in background instead of inline generation
+  onCreateProject?: (songId: string, config: any) => void; // Callback for background mode
+  onCreateVideoProject?: (songId: string, config: any) => Promise<string | null>; // Callback for creating video project, returns projectId
+  token?: string | null; // Token for API calls
+  initialConfig?: any; // Pre-loaded config for re-rendering
 }
 
 type PresetType = 
@@ -101,7 +109,18 @@ function ColumnsIcon() {
   );
 }
 
-export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({ isOpen, onClose, song }) => {
+export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({
+  isOpen,
+  onClose,
+  song,
+  songs = [],
+  onPublishToYouTube,
+  backgroundMode = false,
+  onCreateProject,
+  onCreateVideoProject,
+  token,
+  initialConfig
+}) => {
   const { isMobile } = useResponsive();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -148,6 +167,11 @@ export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({ isOpen
   const [exportStage, setExportStage] = useState<'idle' | 'capturing' | 'encoding'>('idle');
   const [ffmpegLoaded, setFfmpegLoaded] = useState(false);
   const [ffmpegLoading, setFfmpegLoading] = useState(false);
+  const [exportedVideoUrl, setExportedVideoUrl] = useState<string | null>(null);
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+
+  // Background mode: selected song (for song selector)
+  const [selectedSong, setSelectedSong] = useState<Song | null>(song || null);
 
   // Config State
   const [config, setConfig] = useState<VisualizerConfig>({
@@ -202,6 +226,63 @@ export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({ isOpen
         ]);
     }
   }, [song]);
+
+  // Ref to track if initial config has been loaded
+  const hasLoadedInitialConfig = useRef(false);
+
+  // Load initial config when provided (for re-rendering)
+  useEffect(() => {
+    if (isOpen && initialConfig) {
+      // Only load config on first open, not on every isOpen change
+      if (!hasLoadedInitialConfig.current) {
+        setConfig({
+          preset: initialConfig.preset || 'NCS Circle',
+          primaryColor: initialConfig.primaryColor || '#ec4899',
+          secondaryColor: initialConfig.secondaryColor || '#3b82f6',
+          bgDim: initialConfig.bgDim ?? 0.6,
+          particleCount: initialConfig.particleCount ?? 50,
+        });
+        setEffects(initialConfig.effects || {
+          shake: true,
+          glitch: false,
+          vhs: false,
+          cctv: false,
+          scanlines: false,
+          chromatic: false,
+          bloom: false,
+          filmGrain: false,
+          pixelate: false,
+          strobe: false,
+          vignette: false,
+          hueShift: false,
+          letterbox: false
+        });
+        setIntensities(initialConfig.intensities || {
+          shake: 0.05,
+          glitch: 0.3,
+          vhs: 0.5,
+          cctv: 0.8,
+          scanlines: 0.4,
+          chromatic: 0.5,
+          bloom: 0.5,
+          filmGrain: 0.3,
+          pixelate: 0.3,
+          strobe: 0.5,
+          vignette: 0.5,
+          hueShift: 0.5,
+          letterbox: 0.5
+        });
+        setTextLayers(initialConfig.textLayers || []);
+        setBackgroundType(initialConfig.backgroundType || 'random');
+        setCustomImage(initialConfig.customImage);
+        setCustomAlbumArt(initialConfig.customAlbumArt);
+        setVideoUrl(initialConfig.videoUrl);
+        hasLoadedInitialConfig.current = true;
+      }
+    } else {
+      hasLoadedInitialConfig.current = false;
+    }
+  }, [isOpen, initialConfig]);
 
   // Use refs for render loop to access latest state without re-binding
   const configRef = useRef(config);
@@ -332,6 +413,7 @@ export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({ isOpen
     setIsExporting(false);
     setExportProgress(0);
     setExportStage('idle');
+    setExportedVideoUrl(null);
 
     // Audio Setup
     const audio = new Audio();
@@ -379,7 +461,36 @@ export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({ isOpen
   };
 
   const startRecording = async () => {
-    if (!canvasRef.current || !song) return;
+    const targetSong = selectedSong || song;
+    if (!canvasRef.current || !targetSong) return;
+
+    // Build project config
+    const projectConfig = {
+      preset: config.preset,
+      visualizer: config.preset,
+      effects: effects,
+      intensities: intensities,
+      textLayers: textLayers,
+      backgroundType: backgroundType === 'video' ? 'video' : (backgroundType === 'custom' ? 'image' : 'gradient'),
+      customImage: customImage || undefined,
+      customAlbumArt: customAlbumArt || undefined,
+      videoUrl: videoUrl || undefined,
+    };
+
+    // Background mode: Create project (for YouTubeStudioView compatibility)
+    if (backgroundMode && onCreateProject) {
+      onCreateProject(targetSong.id, projectConfig);
+      return;
+    }
+
+    // Create video project first (so it shows up in YouTube Studio)
+    let projectId: string | null = null;
+    if (onCreateVideoProject && token) {
+      projectId = await onCreateVideoProject(targetSong.id, projectConfig);
+      if (projectId) {
+        setCurrentProjectId(projectId);
+      }
+    }
 
     // Load FFmpeg if not loaded
     if (!ffmpegRef.current) {
@@ -392,13 +503,450 @@ export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({ isOpen
     setExportProgress(0);
 
     try {
-      await renderOffline();
+      await renderOffline(projectId, token);
     } catch (error) {
       console.error('Rendering failed:', error);
       alert('Video rendering failed. Please try again.');
       setIsExporting(false);
       setExportStage('idle');
+      setCurrentProjectId(null);
     }
+  };
+
+  // Render video in background with progress tracking
+  const renderInBackground = async (projectId: string, song: Song, config: any) => {
+    if (!token) return;
+
+    try {
+      // Update progress: starting
+      await videoProjectsApi.updateProgress(projectId, 'starting', 1, token);
+
+      // Load FFmpeg if not loaded
+      if (!ffmpegRef.current) {
+        await loadFFmpeg();
+        if (!ffmpegRef.current) {
+          throw new Error('Failed to load FFmpeg');
+        }
+      }
+
+      await videoProjectsApi.updateProgress(projectId, 'capturing', 5, token);
+
+      // Run the same renderOffline logic but with progress updates
+      const videoBlob = await renderOfflineWithProgress(projectId, song, token);
+
+      await videoProjectsApi.updateProgress(projectId, 'uploading', 95, token);
+
+      // Upload completed video to server
+      await videoProjectsApi.uploadVideo(projectId, videoBlob, token);
+
+      await videoProjectsApi.updateProgress(projectId, 'completed', 100, token);
+
+      console.log('[Background Render] Video rendering and upload completed successfully');
+    } catch (error) {
+      console.error('[Background Render] Error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      await videoProjectsApi.markFailed(projectId, errorMessage, token);
+    }
+  };
+
+  // Render offline with progress updates (same logic as renderOffline but returns blob)
+  const renderOfflineWithProgress = async (projectId: string, song: Song, token: string): Promise<Blob> => {
+    if (!ffmpegRef.current) throw new Error('FFmpeg not loaded');
+
+    // Create a separate clean canvas to avoid tainted canvas issues
+    const canvas = document.createElement('canvas');
+    canvas.width = 1920;
+    canvas.height = 1080;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Could not get canvas context');
+
+    const ffmpeg = ffmpegRef.current;
+    const fps = 30;
+    const width = canvas.width;
+    const height = canvas.height;
+    const centerX = width / 2;
+    const centerY = height / 2;
+
+    await videoProjectsApi.updateProgress(projectId, 'loading', 5, token);
+
+    // Pre-load images via proxy to avoid CORS/tainted canvas issues
+    let bgImage: HTMLImageElement | null = null;
+    let bgVideo: HTMLVideoElement | null = null;
+    let albumImage: HTMLImageElement | null = null;
+
+    // Load background video or image
+    if (backgroundType === 'video' && videoUrl) {
+      bgVideo = document.createElement('video');
+      bgVideo.crossOrigin = 'anonymous';
+      bgVideo.src = videoUrl;
+      bgVideo.muted = true;
+      bgVideo.playsInline = true;
+      await new Promise<void>((resolve) => {
+        bgVideo!.onloadeddata = () => resolve();
+        bgVideo!.onerror = () => {
+          console.warn('Failed to load background video, falling back to image');
+          bgVideo = null;
+          resolve();
+        };
+        bgVideo!.load();
+      });
+    } else if (bgImageRef.current?.src) {
+      const bgDataUrl = await loadImageAsDataUrl(bgImageRef.current.src);
+      if (bgDataUrl) {
+        bgImage = new Image();
+        bgImage.src = bgDataUrl;
+        await new Promise<void>((resolve) => {
+          bgImage!.onload = () => resolve();
+          bgImage!.onerror = () => resolve();
+        });
+      }
+    }
+
+    // Load album art (use custom if set, otherwise song cover)
+    const albumArtSource = customAlbumArt || song.coverUrl;
+    if (albumArtSource) {
+      const albumDataUrl = albumArtSource.startsWith('data:')
+        ? albumArtSource
+        : await loadImageAsDataUrl(albumArtSource);
+      if (albumDataUrl) {
+        albumImage = new Image();
+        albumImage.src = albumDataUrl;
+        await new Promise<void>((resolve) => {
+          albumImage!.onload = () => resolve();
+          albumImage!.onerror = () => resolve();
+        });
+      }
+    }
+
+    // Fetch and decode audio
+    await videoProjectsApi.updateProgress(projectId, 'loading', 10, token);
+    const audioUrl = song.audioUrl || '';
+    const audioResponse = await fetch(audioUrl);
+    const audioArrayBuffer = await audioResponse.arrayBuffer();
+
+    // Keep a copy for FFmpeg
+    const audioDataCopy = audioArrayBuffer.slice(0);
+
+    // Decode audio for analysis
+    const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+    const audioBuffer = await audioCtx.decodeAudioData(audioArrayBuffer);
+    const duration = audioBuffer.duration;
+    const totalFrames = Math.ceil(duration * fps);
+
+    await videoProjectsApi.updateProgress(projectId, 'analyzing', 15, token);
+
+    // Analyze audio to get frequency data for each frame
+    const frequencyDataFrames = await analyzeAudioOffline(audioBuffer, fps);
+
+    await videoProjectsApi.updateProgress(projectId, 'rendering', 20, token);
+
+    // Render all frames
+    const currentConfig = configRef.current;
+    const currentEffects = effectsRef.current;
+    const currentIntensities = intensitiesRef.current;
+    const currentTexts = textLayersRef.current;
+
+    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+      const time = frameIndex / fps;
+      const dataArray = frequencyDataFrames[frameIndex] || new Uint8Array(1024);
+
+      // Create time domain data (simple sine wave approximation based on bass)
+      const timeDomain = new Uint8Array(1024);
+      let bassSum = 0;
+      for (let i = 0; i < 20; i++) bassSum += dataArray[i];
+      const bassLevel = bassSum / 20 / 255;
+      for (let i = 0; i < timeDomain.length; i++) {
+        timeDomain[i] = 128 + Math.sin(i * 0.1 + time * 10) * 64 * bassLevel;
+      }
+
+      // Calculate bass and pulse
+      let bass = 0;
+      for (let i = 0; i < 20; i++) bass += dataArray[i];
+      bass = bass / 20;
+      const normBass = bass / 255;
+      const pulse = 1 + normBass * 0.15;
+
+      // Clear canvas
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, width, height);
+
+      // Draw background (video or image)
+      let bgSource: HTMLImageElement | HTMLVideoElement | null = bgImage;
+
+      if (bgVideo) {
+        const videoTime = time % (bgVideo.duration || 1);
+        bgVideo.currentTime = videoTime;
+        await new Promise<void>((resolve) => {
+          const onSeeked = () => {
+            bgVideo!.removeEventListener('seeked', onSeeked);
+            resolve();
+          };
+          bgVideo!.addEventListener('seeked', onSeeked);
+          setTimeout(resolve, 50);
+        });
+        bgSource = bgVideo;
+      }
+
+      if (bgSource) {
+        ctx.save();
+        ctx.globalAlpha = 1 - currentConfig.bgDim;
+
+        if (currentEffects.shake && normBass > (0.6 - (currentIntensities.shake * 0.3))) {
+          const magnitude = currentIntensities.shake * 50;
+          const shakeX = (Math.random() - 0.5) * magnitude * normBass;
+          const shakeY = (Math.random() - 0.5) * magnitude * normBass;
+          ctx.translate(shakeX, shakeY);
+        }
+
+        const zoom = 1 + (Math.sin(time * 0.5) * 0.05);
+        ctx.translate(centerX, centerY);
+        ctx.scale(zoom, zoom);
+        ctx.drawImage(bgSource, -width/2, -height/2, width, height);
+        ctx.restore();
+      }
+
+      // Draw preset
+      ctx.save();
+      if (currentEffects.shake && normBass > 0.6) {
+        const magnitude = currentIntensities.shake * 30;
+        const shakeX = (Math.random() - 0.5) * magnitude * normBass;
+        const shakeY = (Math.random() - 0.5) * magnitude * normBass;
+        ctx.translate(shakeX, shakeY);
+      }
+
+      switch(currentConfig.preset) {
+        case 'NCS Circle':
+          drawNCSCircle(ctx, centerX, centerY, dataArray, pulse, time, currentConfig.primaryColor, currentConfig.secondaryColor);
+          break;
+        case 'Linear Bars':
+          drawLinearBars(ctx, width, height, dataArray, currentConfig.primaryColor, currentConfig.secondaryColor);
+          break;
+        case 'Dual Mirror':
+          drawDualMirror(ctx, width, height, dataArray, currentConfig.primaryColor);
+          break;
+        case 'Center Wave':
+          drawCenterWave(ctx, centerX, centerY, dataArray, time, currentConfig.primaryColor);
+          break;
+        case 'Orbital':
+          drawOrbital(ctx, centerX, centerY, dataArray, time, currentConfig.primaryColor, currentConfig.secondaryColor);
+          break;
+        case 'Hexagon':
+          drawHexagon(ctx, centerX, centerY, dataArray, pulse, time, currentConfig.primaryColor);
+          break;
+        case 'Oscilloscope':
+          drawOscilloscope(ctx, width, height, timeDomain, currentConfig.primaryColor);
+          break;
+        case 'Digital Rain':
+          drawDigitalRain(ctx, width, height, dataArray, time, currentConfig.primaryColor);
+          break;
+        case 'Shockwave':
+          drawShockwave(ctx, centerX, centerY, bass, time, currentConfig.primaryColor);
+          break;
+      }
+
+      drawParticles(ctx, width, height, time, bass, currentConfig.particleCount, currentConfig.primaryColor);
+
+      if (['NCS Circle', 'Hexagon', 'Orbital', 'Shockwave'].includes(currentConfig.preset) && albumImage) {
+        ctx.save();
+        ctx.translate(centerX, centerY);
+        ctx.scale(pulse, pulse);
+        ctx.shadowBlur = 40;
+        ctx.shadowColor = currentConfig.primaryColor;
+        ctx.beginPath();
+        ctx.arc(0, 0, 150, 0, Math.PI * 2);
+        ctx.closePath();
+        ctx.lineWidth = 5;
+        ctx.strokeStyle = 'white';
+        ctx.stroke();
+        ctx.clip();
+        ctx.drawImage(albumImage, -150, -150, 300, 300);
+        ctx.restore();
+      }
+
+      // Pixelate effect
+      if (currentEffects.pixelate) {
+        const pixelSize = Math.max(4, Math.floor(16 * currentIntensities.pixelate));
+        ctx.imageSmoothingEnabled = false;
+        const tempCanvas2 = document.createElement('canvas');
+        const smallW = Math.floor(width / pixelSize);
+        const smallH = Math.floor(height / pixelSize);
+        tempCanvas2.width = smallW;
+        tempCanvas2.height = smallH;
+        const tempCtx2 = tempCanvas2.getContext('2d')!;
+        tempCtx2.drawImage(canvas, 0, 0, smallW, smallH);
+        ctx.clearRect(0, 0, width, height);
+        ctx.drawImage(tempCanvas2, 0, 0, smallW, smallH, 0, 0, width, height);
+        ctx.imageSmoothingEnabled = true;
+      }
+
+      // Draw text layers
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = 'black';
+      ctx.textAlign = 'center';
+
+      currentTexts.forEach(layer => {
+        ctx.fillStyle = layer.color;
+        const dynamicSize = layer.id === '1' && currentConfig.preset === 'Minimal' ? layer.size * pulse : layer.size;
+        ctx.font = `bold ${dynamicSize}px ${layer.font}, sans-serif`;
+        const xPos = (layer.x / 100) * width;
+        const yPos = (layer.y / 100) * height;
+        ctx.fillText(layer.text, xPos, yPos);
+      });
+
+      ctx.restore();
+
+      // Apply post-processing effects
+      if (currentEffects.scanlines || currentEffects.cctv) {
+        ctx.fillStyle = `rgba(0,0,0,${currentIntensities.scanlines * 0.8})`;
+        for (let i = 0; i < height; i += 4) {
+          ctx.fillRect(0, i, width, 2);
+        }
+      }
+
+      if (currentEffects.vhs || currentEffects.chromatic || (currentEffects.glitch && Math.random() > (1 - currentIntensities.glitch))) {
+        const intensity = currentEffects.vhs ? currentIntensities.vhs : currentIntensities.chromatic;
+        const offset = (10 * intensity) * normBass;
+        ctx.globalCompositeOperation = 'screen';
+        ctx.fillStyle = `rgba(255,0,0,${0.2 * intensity})`;
+        ctx.fillRect(-offset, 0, width, height);
+        ctx.fillStyle = `rgba(0,0,255,${0.2 * intensity})`;
+        ctx.fillRect(offset, 0, width, height);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      if (currentEffects.glitch && Math.random() > (1 - currentIntensities.glitch)) {
+        ctx.fillStyle = Math.random() > 0.5 ? currentConfig.primaryColor : '#fff';
+        ctx.fillRect(Math.random() * width, Math.random() * height, Math.random() * 200, 4);
+      }
+
+      if (currentEffects.cctv) {
+        const intensity = currentIntensities.cctv;
+        ctx.globalCompositeOperation = 'overlay';
+        ctx.fillStyle = `rgba(0, 50, 0, ${0.4 * intensity})`;
+        ctx.fillRect(0, 0, width, height);
+
+        const grad = ctx.createRadialGradient(centerX, centerY, height * 0.4, centerX, centerY, height * 0.9);
+        grad.addColorStop(0, 'transparent');
+        grad.addColorStop(1, 'black');
+        ctx.globalCompositeOperation = 'multiply';
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, width, height);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      if (currentEffects.bloom) {
+        const intensity = currentIntensities.bloom;
+        ctx.globalCompositeOperation = 'screen';
+        ctx.filter = `blur(${15 * intensity}px)`;
+        ctx.globalAlpha = 0.4 * intensity;
+        ctx.drawImage(canvas, 0, 0);
+        ctx.filter = 'none';
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      if (currentEffects.filmGrain) {
+        const intensity = currentIntensities.filmGrain;
+        const imageData = ctx.getImageData(0, 0, width, height);
+        const data = imageData.data;
+        const grainAmount = intensity * 50;
+        for (let i = 0; i < data.length; i += 16) {
+          const noise = (Math.random() - 0.5) * grainAmount;
+          data[i] += noise;
+          data[i + 1] += noise;
+          data[i + 2] += noise;
+        }
+        ctx.putImageData(imageData, 0, 0);
+      }
+
+      if (currentEffects.strobe && normBass > (0.7 - currentIntensities.strobe * 0.3)) {
+        ctx.globalCompositeOperation = 'screen';
+        ctx.fillStyle = `rgba(255, 255, 255, ${currentIntensities.strobe * normBass * 0.8})`;
+        ctx.fillRect(0, 0, width, height);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      if (currentEffects.vignette) {
+        const intensity = currentIntensities.vignette;
+        const grad = ctx.createRadialGradient(centerX, centerY, height * 0.3, centerX, centerY, height * 0.8);
+        grad.addColorStop(0, 'transparent');
+        grad.addColorStop(1, `rgba(0, 0, 0, ${0.8 * intensity})`);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      if (currentEffects.hueShift) {
+        const hueRotation = currentIntensities.hueShift * 360 * (1 + normBass * 0.5);
+        ctx.filter = `hue-rotate(${hueRotation}deg)`;
+        ctx.drawImage(canvas, 0, 0);
+        ctx.filter = 'none';
+      }
+
+      if (currentEffects.letterbox) {
+        const barHeight = height * 0.12 * currentIntensities.letterbox;
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, width, barHeight);
+        ctx.fillRect(0, height - barHeight, width, barHeight);
+      }
+
+      // Capture frame
+      const frameData = canvas.toDataURL('image/jpeg', 0.85);
+      const base64Data = frameData.split(',')[1];
+      const binaryData = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+      await ffmpeg.writeFile(`frame${String(frameIndex).padStart(6, '0')}.jpg`, binaryData);
+
+      // Update progress periodically (20-70% for frame rendering)
+      if (frameIndex % 10 === 0) {
+        const progress = 20 + Math.round((frameIndex / totalFrames) * 50);
+        await videoProjectsApi.updateProgress(projectId, 'rendering', progress, token);
+      }
+    }
+
+    await videoProjectsApi.updateProgress(projectId, 'encoding', 70, token);
+
+    // Write audio file
+    await ffmpeg.writeFile('audio.mp3', new Uint8Array(audioDataCopy));
+
+    await videoProjectsApi.updateProgress(projectId, 'encoding', 75, token);
+
+    // Encode video
+    await ffmpeg.exec([
+      '-framerate', String(fps),
+      '-i', 'frame%06d.jpg',
+      '-i', 'audio.mp3',
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-tune', 'fastdecode',
+      '-crf', '28',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-shortest',
+      '-movflags', '+faststart',
+      'output.mp4'
+    ]);
+
+    await videoProjectsApi.updateProgress(projectId, 'encoding', 90, token);
+
+    // Read output
+    const outputData = await ffmpeg.readFile('output.mp4');
+
+    if (outputData.length === 0) {
+      throw new Error('FFmpeg produced an empty output file');
+    }
+
+    const blob = new Blob([outputData], { type: 'video/mp4' });
+
+    // Cleanup FFmpeg filesystem
+    for (let i = 0; i < totalFrames; i++) {
+      await ffmpeg.deleteFile(`frame${String(i).padStart(6, '0')}.jpg`).catch(() => {});
+    }
+    await ffmpeg.deleteFile('audio.mp3').catch(() => {});
+    await ffmpeg.deleteFile('output.mp4').catch(() => {});
+    await audioCtx.close();
+
+    return blob;
   };
 
   const analyzeAudioOffline = async (audioBuffer: AudioBuffer, fps: number): Promise<Uint8Array[]> => {
@@ -461,7 +1009,7 @@ export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({ isOpen
     }
   };
 
-  const renderOffline = async () => {
+  const renderOffline = async (projectId?: string | null, authToken?: string | null) => {
     if (!song || !ffmpegRef.current) return;
 
     // Create a separate clean canvas to avoid tainted canvas issues
@@ -871,6 +1419,9 @@ export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({ isOpen
     const url = URL.createObjectURL(blob);
     console.log('[Video] Created blob URL:', url, 'Size:', blob.size);
 
+    // Store the exported video URL for YouTube upload
+    setExportedVideoUrl(url);
+
     // More reliable download method
     const a = document.createElement('a');
     a.style.display = 'none';
@@ -879,11 +1430,10 @@ export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({ isOpen
     document.body.appendChild(a);
     a.click();
 
-    // Delay cleanup to ensure download starts
+    // Don't revoke the URL immediately since we need it for YouTube upload
     setTimeout(() => {
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 1000);
+    }, 100);
 
     console.log('[Video] Download triggered!');
 
@@ -895,6 +1445,17 @@ export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({ isOpen
     await ffmpeg.deleteFile('audio.mp3').catch(() => {});
     await ffmpeg.deleteFile('output.mp4').catch(() => {});
     await audioCtx.close();
+
+    // Upload to video project if we have a projectId and token
+    if (projectId && authToken) {
+      try {
+        await videoProjectsApi.uploadVideo(projectId, blob, authToken);
+        await videoProjectsApi.updateProgress(projectId, 'completed', 100, authToken);
+        console.log('[Video] Uploaded to project:', projectId);
+      } catch (error) {
+        console.error('[Video] Failed to upload to project:', error);
+      }
+    }
 
     setExportProgress(100);
 
@@ -2160,14 +2721,40 @@ export const VideoGeneratorModal: React.FC<VideoGeneratorModalProps> = ({ isOpen
                              )}
                          </div>
                      </div>
+                 ) : exportedVideoUrl ? (
+                    <div className="grid grid-cols-2 gap-3">
+                       <button
+                           onClick={startRecording}
+                           className="h-12 bg-white text-black font-bold rounded-xl flex items-center justify-center gap-2 hover:scale-105 transition-transform"
+                       >
+                           <Download size={18} />
+                           Download
+                       </button>
+                       <button
+                           onClick={() => onPublishToYouTube && onPublishToYouTube(exportedVideoUrl, song || undefined)}
+                           className="h-12 bg-red-600 text-white font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-red-700 hover:scale-105 transition-all"
+                       >
+                           <Youtube size={18} />
+                           Publish to YouTube
+                       </button>
+                    </div>
                  ) : (
                     <button
                         onClick={startRecording}
                         disabled={ffmpegLoading}
                         className="w-full h-12 bg-white text-black font-bold rounded-xl flex items-center justify-center gap-2 hover:scale-105 transition-transform disabled:opacity-50"
                     >
-                        <Download size={18} />
-                        Render Video (MP4)
+                        {backgroundMode ? (
+                          <>
+                            <Wand2 size={18} />
+                            Create Video Project
+                          </>
+                        ) : (
+                          <>
+                            <Download size={18} />
+                            Render Video (MP4)
+                          </>
+                        )}
                     </button>
                  )}
                  <p className="text-[10px] text-zinc-600 text-center">

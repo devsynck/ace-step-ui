@@ -139,6 +139,28 @@ CREATE TABLE IF NOT EXISTS ai_providers (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Video Projects table (for YouTube video generation and publishing)
+CREATE TABLE IF NOT EXISTS video_projects (
+  id TEXT PRIMARY KEY,
+  song_id TEXT NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  state TEXT NOT NULL DEFAULT 'not_started',
+  render_stage TEXT,
+  progress INTEGER DEFAULT 0,
+  video_url TEXT,
+  error_message TEXT,
+  config TEXT,
+  youtube_metadata TEXT,
+  upload_progress INTEGER DEFAULT 0,
+  youtube_video_id TEXT,
+  youtube_video_url TEXT,
+  render_job_id TEXT,
+  upload_job_id TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_songs_user_id ON songs(user_id);
 CREATE INDEX IF NOT EXISTS idx_songs_created_at ON songs(created_at);
@@ -155,12 +177,28 @@ CREATE INDEX IF NOT EXISTS idx_followers_following ON followers(following_id);
 CREATE INDEX IF NOT EXISTS idx_reference_tracks_user_id ON reference_tracks(user_id);
 CREATE INDEX IF NOT EXISTS idx_reference_tracks_created_at ON reference_tracks(created_at);
 CREATE INDEX IF NOT EXISTS idx_ai_providers_user_id ON ai_providers(user_id);
+
+-- Video projects indexes
+CREATE INDEX IF NOT EXISTS idx_video_projects_song_id ON video_projects(song_id);
+CREATE INDEX IF NOT EXISTS idx_video_projects_user_id ON video_projects(user_id);
+CREATE INDEX IF NOT EXISTS idx_video_projects_state ON video_projects(state);
+CREATE INDEX IF NOT EXISTS idx_video_projects_created_at ON video_projects(created_at DESC);
 `;
 
 function migrate(): void {
   console.log('Running SQLite database migrations...');
 
   try {
+    // Drop the old unique index on video_projects.song_id if it exists
+    // This allows multiple video projects per song (for re-rendering)
+    try {
+      db.exec('DROP INDEX IF EXISTS idx_video_projects_song_id;');
+      console.log('Dropped unique index on video_projects.song_id');
+    } catch (e) {
+      // Index might not exist, that's fine
+      console.log('Note: Unique index on video_projects.song_id did not exist or could not be dropped');
+    }
+
     // Execute the entire migration script at once
     db.exec(migrations);
     console.log('Migrations completed successfully!');

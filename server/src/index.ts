@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 // Load .env from project root (parent of server directory)
@@ -16,6 +17,18 @@ import { runCleanupJob, cleanupDeletedSongs } from './services/cleanup.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Create necessary directories
+const dirs = [
+  path.join(__dirname, '../public/audio'),
+  path.join(__dirname, '../public/videos'),
+  path.join(__dirname, '../temp')
+];
+for (const dir of dirs) {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
 import authRoutes from './routes/auth.js';
 import songsRoutes from './routes/songs.js';
 import generateRoutes from './routes/generate.js';
@@ -24,6 +37,8 @@ import playlistsRoutes from './routes/playlists.js';
 import contactRoutes from './routes/contact.js';
 import referenceTrackRoutes from './routes/referenceTrack.js';
 import settingsRoutes from './routes/settings.js';
+import youtubeRoutes from './routes/youtube.js';
+import videoProjectsRoutes from './routes/videoProjects.js';
 import { pool } from './db/pool.js';
 import './db/migrate.js';
 
@@ -79,6 +94,9 @@ app.use(express.json());
 
 // Serve static audio files
 app.use('/audio', express.static(path.join(__dirname, '../public/audio')));
+
+// Serve static video files
+app.use('/videos', express.static(path.join(__dirname, '../public/videos')));
 
 // Audio Editor (AudioMass) - needs relaxed CSP for inline scripts and external images
 app.use('/editor', (req, res, next) => {
@@ -405,6 +423,8 @@ app.use('/api/playlists', playlistsRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/reference-tracks', referenceTrackRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/youtube', youtubeRoutes);
+app.use('/api/video-projects', videoProjectsRoutes);
 
 // Error handler
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

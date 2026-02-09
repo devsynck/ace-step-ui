@@ -1,5 +1,5 @@
 import React from 'react';
-import { Library, Disc, Search, User, LogIn, LogOut, Sun, Moon, Settings } from 'lucide-react';
+import { Library, Disc, Search, User, LogIn, LogOut, Sun, Moon, Settings, Youtube } from 'lucide-react';
 import { View } from '../types';
 
 interface SidebarProps {
@@ -56,6 +56,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label="Search"
           active={currentView === 'search'}
           onClick={() => onNavigate('search')}
+        />
+        <NavItem
+          icon={<Youtube size={24} />}
+          label="YouTube Studio"
+          active={currentView === 'youtube_studio'}
+          onClick={() => onNavigate('youtube_studio')}
+          isYouTube
         />
 
         <div className="mt-auto flex flex-col gap-4">
@@ -115,18 +122,19 @@ interface NavItemProps {
   label: string;
   active?: boolean;
   onClick: () => void;
+  isYouTube?: boolean;
 }
 
-const NavItem: React.FC<NavItemProps> = ({ icon, label, active, onClick }) => (
+const NavItem: React.FC<NavItemProps> = ({ icon, label, active, onClick, isYouTube }) => (
   <button
     onClick={onClick}
     className={`
       w-full aspect-square rounded-xl flex flex-col items-center justify-center gap-1 transition-all duration-200 group relative
-      ${active ? 'bg-zinc-100 dark:bg-white/10 text-black dark:text-white' : 'text-zinc-500 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5'}
+      ${active && isYouTube ? 'bg-red-500/20 text-red-500' : active ? 'bg-zinc-100 dark:bg-white/10 text-black dark:text-white' : 'text-zinc-500 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5'}
     `}
     title={label}
   >
-    {active && <div className="absolute left-0 top-1/2 -translate-y-1/2 h-8 w-1 bg-pink-500 rounded-r-full"></div>}
+    {active && <div className={`absolute left-0 top-1/2 -translate-y-1/2 h-8 w-1 rounded-r-full ${isYouTube ? 'bg-red-500' : 'bg-pink-500'}`}></div>}
     {icon}
   </button>
 );
